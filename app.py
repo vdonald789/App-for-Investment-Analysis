@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import statsmodels.api as sm
-import getFamaFrenchFactors as gff
+import pandas_datareader.data as web
 import matplotlib.pyplot as plt
 import warnings
 
 warnings.filterwarnings("ignore")
 
-# ── Page config ──────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Factor Model Analyzer", page_icon="📈", layout="wide")
 
 st.title("📈 Fama-French Factor Model Analyzer")
@@ -21,10 +21,9 @@ st.markdown(
 # ── Sidebar inputs ────────────────────────────────────────────────────────────
 st.sidebar.header("⚙️ Settings")
 
-default_tickers = "TSLA, SPY, FCNTX"
 ticker_input = st.sidebar.text_input(
     "Tickers (comma-separated)",
-    value=default_tickers,
+    value="TSLA, SPY, FCNTX",
     help="Enter up to 5 ticker symbols. Example: TSLA, SPY, FCNTX",
 )
 
@@ -40,49 +39,48 @@ st.sidebar.markdown(
     "- Fama-French 3-Factor\n\n"
     "**Data sources**\n"
     "- Yahoo Finance (prices)\n"
-    "- getFamaFrenchFactors (FF3 factors)"
+    "- Ken French Data Library via pandas_datareader"
 )
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def load_ff3_factors():
-    ff3 = gff.famaFrench3Factor(frequency="m")
-    ff3.rename(columns={"date_ff_factors": "Date"}, inplace=True)
-    ff3.set_index("Date", inplace=True)
-    return ff3
+def load_ff3_factors(start, end):
+    df = web.DataReader("F-F_Research_Data_Factors", "famafrench", start=str(start), end=str(end))[0]
+    df = df.div(100)
+    df.index = df.index.to_timestamp()
+    df.index = df.index + pd.offsets.MonthEnd(0)
+    return df
 
 
 @st.cache_data(show_spinner=False)
 def load_prices(tickers, start, end):
     prices = yf.download(tickers, start=str(start), end=str(end), progress=False)["Close"]
-    if isinstance(prices, pd.Series):          # single ticker → make DataFrame
+    if isinstance(prices, pd.Series):
         prices = prices.to_frame(tickers[0])
     return prices
 
 
-def run_capm(data, asset):
-    Y = data[asset + "_excess"].dropna()
+def run_capm(data, ticker):
+    Y = data[ticker + "_excess"].dropna()
     X = sm.add_constant(data.loc[Y.index, ["Mkt-RF"]])
-    model = sm.OLS(Y, X).fit()
-    return model
+    return sm.OLS(Y, X).fit()
 
 
-def run_ff3(data, asset):
-    Y = data[asset + "_excess"].dropna()
+def run_ff3(data, ticker):
+    Y = data[ticker + "_excess"].dropna()
     X = sm.add_constant(data.loc[Y.index, ["Mkt-RF", "SMB", "HML"]])
-    model = sm.OLS(Y, X).fit()
-    return model
+    return sm.OLS(Y, X).fit()
 
 
-def model_summary_table(model, model_name):
+def model_summary_table(model):
     params = model.params
     pvals  = model.pvalues
+    label_map = {"const": "Alpha (α)", "Mkt-RF": "Market Beta", "SMB": "SMB", "HML": "HML"}
     rows = []
     for k in params.index:
-        label = {"const": "Alpha (α)", "Mkt-RF": "Market Beta", "SMB": "SMB", "HML": "HML"}.get(k, k)
         rows.append({
-            "Factor": label,
+            "Factor":      label_map.get(k, k),
             "Coefficient": f"{params[k]:.4f}",
             "p-value":     f"{pvals[k]:.4f}",
             "Significant": "✅" if pvals[k] < 0.05 else "❌",
@@ -112,29 +110,21 @@ if start_date >= end_date:
 with st.spinner("Downloading price data and Fama-French factors…"):
     try:
         prices = load_prices(tickers, start_date, end_date)
-        ff3    = load_ff3_factors()
+        ff3    = load_ff3_factors(start_date, end_date)
     except Exception as e:
         st.error(f"Data download failed: {e}")
         st.stop()
 
-# Monthly returns
 monthly_prices = prices.resample("ME").last()
 returns = monthly_prices.pct_change().dropna()
+returns.index = returns.index + pd.offsets.MonthEnd(0)
 
-# Merge with FF3
 data = returns.join(ff3, how="inner")
 
-# Check we have FF3 columns
 if "Mkt-RF" not in data.columns:
-    st.error("Could not merge returns with Fama-French factors. Check date range.")
+    st.error("Could not merge returns with Fama-French factors. Try a wider date range.")
     st.stop()
 
-# Convert FF3 from % to decimal if needed
-for col in ["Mkt-RF", "SMB", "HML", "RF"]:
-    if col in data.columns and data[col].abs().mean() > 0.5:
-        data[col] /= 100
-
-# Excess returns
 for ticker in tickers:
     if ticker in data.columns:
         data[ticker + "_excess"] = data[ticker] - data["RF"]
@@ -148,14 +138,14 @@ missing = set(tickers) - set(valid_tickers)
 if missing:
     st.warning(f"No data found for: {', '.join(missing)}. Continuing with available tickers.")
 
-# ── Section 1: Cumulative Returns Chart ───────────────────────────────────────
+# ── Section 1: Cumulative Returns ─────────────────────────────────────────────
 st.subheader("📊 Cumulative Returns")
 
 fig, ax = plt.subplots(figsize=(10, 4))
 for ticker in valid_tickers:
     cum = (1 + data[ticker]).cumprod()
     ax.plot(cum.index, cum.values, label=ticker)
-ax.set_title("Cumulative Returns (monthly resampled)")
+ax.set_title("Cumulative Returns (monthly)")
 ax.set_ylabel("Growth of $1")
 ax.legend()
 ax.grid(True, alpha=0.3)
@@ -163,14 +153,12 @@ plt.tight_layout()
 st.pyplot(fig)
 plt.close()
 
-# ── Section 2: Descriptive Stats ─────────────────────────────────────────────
+# ── Section 2: Descriptive Stats ──────────────────────────────────────────────
 st.subheader("📋 Descriptive Statistics (Monthly Returns)")
-
 desc = data[valid_tickers].describe().T
-desc.index.name = "Ticker"
 st.dataframe(desc.style.format("{:.4f}"), use_container_width=True)
 
-# ── Section 3: Factor Model Results ──────────────────────────────────────────
+# ── Section 3: Per-asset Factor Results ───────────────────────────────────────
 st.subheader("🔬 Factor Model Results")
 
 tabs = st.tabs(valid_tickers)
@@ -178,37 +166,33 @@ tabs = st.tabs(valid_tickers)
 for tab, ticker in zip(tabs, valid_tickers):
     with tab:
         st.markdown(f"### {ticker}")
-
         col1, col2 = st.columns(2)
 
-        # CAPM
         with col1:
             st.markdown("**CAPM (1-Factor)**")
             try:
                 capm = run_capm(data, ticker)
-                st.dataframe(model_summary_table(capm, "CAPM"), use_container_width=True, hide_index=True)
+                st.dataframe(model_summary_table(capm), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"CAPM failed: {e}")
 
-        # FF3
         with col2:
             st.markdown("**Fama-French 3-Factor**")
             try:
                 ff3_model = run_ff3(data, ticker)
-                st.dataframe(model_summary_table(ff3_model, "FF3"), use_container_width=True, hide_index=True)
+                st.dataframe(model_summary_table(ff3_model), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"FF3 failed: {e}")
 
-        # Rolling betas chart
-        st.markdown("**Rolling 24-Month FF3 Beta (Market)**")
+        st.markdown("**Rolling 24-Month Factor Betas**")
         try:
-            roll_results = []
             window = 24
-            asset_col = ticker + "_excess"
+            asset_col   = ticker + "_excess"
             factor_cols = ["Mkt-RF", "SMB", "HML"]
             sub = data[[asset_col] + factor_cols].dropna()
 
             if len(sub) >= window + 5:
+                roll_results = []
                 for i in range(len(sub) - window + 1):
                     chunk = sub.iloc[i : i + window]
                     Y = chunk[asset_col]
@@ -219,9 +203,10 @@ for tab, ticker in zip(tabs, valid_tickers):
                 roll_df = pd.DataFrame(roll_results).set_index("Date")
 
                 fig2, ax2 = plt.subplots(figsize=(10, 3))
-                for col, lbl in [("Mkt-RF", "Market β"), ("SMB", "SMB β"), ("HML", "HML β")]:
+                label_map = {"Mkt-RF": "Market β", "SMB": "SMB β", "HML": "HML β"}
+                for col in factor_cols:
                     if col in roll_df.columns:
-                        ax2.plot(roll_df.index, roll_df[col], label=lbl)
+                        ax2.plot(roll_df.index, roll_df[col], label=label_map.get(col, col))
                 ax2.axhline(0, color="black", linewidth=0.8, linestyle="--")
                 ax2.set_title(f"{ticker} – Rolling 24-Month Factor Betas")
                 ax2.legend()
@@ -234,8 +219,8 @@ for tab, ticker in zip(tabs, valid_tickers):
         except Exception as e:
             st.warning(f"Rolling beta chart error: {e}")
 
-# ── Section 4: Side-by-side comparison ───────────────────────────────────────
-st.subheader("📐 Cross-Asset Factor Comparison")
+# ── Section 4: Cross-asset comparison ────────────────────────────────────────
+st.subheader("📐 Cross-Asset Factor Comparison (FF3)")
 
 summary_rows = []
 for ticker in valid_tickers:
@@ -256,7 +241,6 @@ if summary_rows:
     summary_df = pd.DataFrame(summary_rows).set_index("Ticker")
     st.dataframe(summary_df.style.format("{:.4f}"), use_container_width=True)
 
-    # Bar chart comparison
     fig3, axes = plt.subplots(1, 3, figsize=(12, 4))
     for ax, col in zip(axes, ["Market Beta", "SMB", "HML"]):
         summary_df[col].plot(kind="bar", ax=ax, color="steelblue", edgecolor="white")
@@ -272,6 +256,6 @@ if summary_rows:
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption(
-    "Data: Yahoo Finance · Fama-French factors via getFamaFrenchFactors. "
+    "Data: Yahoo Finance · Fama-French factors via Ken French Data Library (pandas_datareader). "
     "All returns are monthly. Significance threshold: p < 0.05."
 )
