@@ -3,5 +3,5 @@ pandas
 numpy
 yfinance
 statsmodels
-getFamaFrenchFactors
+pandas_datareader
 matplotlib
