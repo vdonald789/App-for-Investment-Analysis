@@ -19,7 +19,7 @@ st.markdown(
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.header("⚙️ Settings")
-ticker_input = st.sidebar.text_input("Tickers (comma-separated)", value="TSLA, SPY, FCNTX")
+ticker_input = st.sidebar.text_input("Tickers (comma-separated)", value="TSLA, SPY")
 start_date   = st.sidebar.date_input("Start Date", value=pd.to_datetime("2010-01-01"))
 end_date     = st.sidebar.date_input("End Date",   value=pd.to_datetime("2025-12-31"))
 run_btn      = st.sidebar.button("🚀 Run Analysis", type="primary")
